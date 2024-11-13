@@ -66,32 +66,6 @@ class EncoderLayer(nn.Module):
         src = self.norm1(src)
         return src
 
-
-
-class TransformerEncoder(nn.Module):
-    def __init__(self, input_dim, num_heads, num_layers, bond_dim, output_dim, dropout=0.0):
-        super(TransformerEncoder, self).__init__()
-        self.layers = nn.ModuleList([EncoderLayer(input_dim, num_heads, bond_dim, dropout) for _ in range(num_layers)])
-        self.norm = nn.LayerNorm(input_dim)
-        self.fc_out = nn.Linear(input_dim, output_dim, bias=False)  # Additional layer to map to output_dim
-        #self.film_scale = nn.Linear(condition_dim, feature_dim)  # to learn gamma
-        #self.film_shift = nn.Linear(condition_dim, feature_dim)  # to learn beta
-
-    def forward(self, src, mask=None):
-        for layer in self.layers:
-            src = layer(src, mask)
-        src = self.norm(src)
-        output = self.fc_out(src)  # Map to output_dim
-        #gamma = self.film_scale(condition).unsqueeze(-1)  # Modulation vector
-        #beta = self.film_shift(condition).unsqueeze(-1)   # Shift vector
-        #output = torch.abs(output)
-        #output = gamma * output + beta
-        return output
-    
-    
-    
-
-
 class TransformerEncoderViT(nn.Module):  
     def __init__(self, input_dim, num_heads, num_layers, bond_dim, output_dim, num_patches, dropout=0.0):
         super().__init__()  
@@ -146,13 +120,26 @@ class PatchEmbedding(nn.Module):
 class VisionTransformer(nn.Module):
     def __init__(self, img_height, img_width, patch_size_h, patch_size_w, input_dim, num_heads, num_layers, bond_dim, output_dim, dropout=0.0):
         super(VisionTransformer, self).__init__()
+        
         self.patch_embed = PatchEmbedding(img_height, img_width, patch_size_h, patch_size_w, input_dim, bond_dim)
+        
+        # Number of patches
         num_patches = (img_height // patch_size_h) * (img_width // patch_size_w)
+        
+        # Learnable positional encoding
+        self.positional_encoding = nn.Parameter(torch.randn(1, num_patches, bond_dim))  
+
+        # Transformer encoder
         self.transformer = TransformerEncoderViT(bond_dim, num_heads, num_layers, bond_dim, output_dim, num_patches, dropout)
 
     def forward(self, x):
-        x = self.patch_embed(x)
+        # Patch embedding
+        x = self.patch_embed(x) 
+        
+        # Add positional encoding to patch embeddings
+        x = x + self.positional_encoding  
+        
+        # Transformer encoder
         x = self.transformer(x)
         return x
-
 
