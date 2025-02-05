@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, TensorDataset, random_split
+from torch.utils.data import DataLoader, TensorDataset, random_split, Subset
 import numpy as np
 from tqdm import trange
 torch.set_float32_matmul_precision('high')
@@ -11,8 +11,8 @@ torch.manual_seed(seed=999)
 # ----------------------------
 def load_data():
     # Load and preprocess data (modify paths as needed)
-    input_CG = np.load('/pscratch/sd/h/hbassi/GS_model_multi_traj_data_coarse_scale_dynamics_1500_tmax=5_sigma=7_numterms=20.npy').reshape((1447, 50, 1, 48, 48))[:1000, :10, 0, :, :]
-    target_FG = np.load('/pscratch/sd/h/hbassi/GS_model_multi_traj_data_fine_scale_dynamics_1500_tmax=5_sigma=7_numterms=20.npy').reshape((1447, 50, 1, 128, 128))[:1000, :10, 0, :, :]
+    input_CG = np.load('/pscratch/sd/h/hbassi/GS_model_multi_traj_data_coarse_scale_dynamics_1200_masked_Aij_tenth_tmax=5_sigma=5_numterms=20.npy')[:, :5, :, :]
+    target_FG = np.load('/pscratch/sd/h/hbassi/GS_model_multi_traj_data_fine_scale_dynamics_1200_masked_Aij_tenth_tmax=5_sigma=5_numterms=20.npy')[:, :5, :, :]
     # Convert to PyTorch tensors
     input_tensor = torch.tensor(input_CG, dtype=torch.float32)
     target_tensor = torch.tensor(target_FG, dtype=torch.float32)
@@ -79,7 +79,7 @@ class SuperResUNet(nn.Module):
         
         # Encoder (48x48 -> 24x24)
         self.encoder = nn.Sequential(
-            nn.Conv2d(10, 64, 3, padding=1),
+            nn.Conv2d(5, 64, 3, padding=1),
             nn.GELU(),
             nn.Conv2d(64, 64, 3, padding=1),
             nn.GELU(),
@@ -90,7 +90,7 @@ class SuperResUNet(nn.Module):
         self.bottleneck = nn.Sequential(
             nn.Conv2d(64, 128, 3, padding=1),
             nn.GELU(),
-            FourierLayer(128, 128, modes1=16, modes2=12),  # Adjusted for 24x24 input
+            FourierLayer(128, 128, modes1=24, modes2=18),  # Adjusted for 24x24 input
             nn.BatchNorm2d(128),  # Added for stability
             nn.GELU(),
             nn.Conv2d(128, 128, 3, padding=1),
@@ -108,7 +108,7 @@ class SuperResUNet(nn.Module):
             nn.Upsample(size=128, mode='bilinear'),  # 96->128
             nn.Conv2d(64, 32, 3, padding=1),
             nn.GELU(),
-            nn.Conv2d(32, 10, 3, padding=1)
+            nn.Conv2d(32, 5, 3, padding=1)
         )
 
     def forward(self, x):
@@ -130,10 +130,24 @@ def train_model():
     print(f'Shape of inputs: {input_tensor.shape}')
     print(f'Shape of targets: {target_tensor.shape}')
     dataset = TensorDataset(input_tensor, target_tensor)
-    train_ds, val_ds = random_split(dataset, [950, 50])
+    # train_ds, val_ds = random_split(dataset, [950, 50])
     
+    # train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
+    # val_loader = DataLoader(val_ds, batch_size=16)
+    # Indices for validation set
+    val_indices = [400, 801, 1202]
+    train_indices = list(set(range(1203)) - set(val_indices))
+    
+    # Create training and validation subsets
+    train_ds = Subset(dataset, train_indices)
+    val_ds = Subset(dataset, val_indices)
+    
+    # Define DataLoaders
     train_loader = DataLoader(train_ds, batch_size=16, shuffle=True)
     val_loader = DataLoader(val_ds, batch_size=16)
+    
+    print(f"Training set size: {len(train_ds)}")
+    print(f"Validation set size: {len(val_ds)}")
     
     # Initialize model
     model = SuperResUNet().to(device)
@@ -149,12 +163,14 @@ def train_model():
     # Training loop
     for epoch in trange(num_epochs + 1):
         model.train()
+        training_loss = 0
         for inputs, targets in train_loader:
             inputs, targets = inputs.to(device), targets.to(device)
             
             optimizer.zero_grad()
             outputs = model(inputs)
             loss = criterion(outputs, targets)
+            training_loss += loss.item()
             loss.backward()
             nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -171,8 +187,8 @@ def train_model():
                     val_loss += criterion(outputs, targets).item()
             
             avg_val_loss = val_loss/len(val_loader)
-            print(f"Epoch {epoch} | Train Loss: {loss.item():.8f} | Val Loss: {avg_val_loss:.8f}")
-            training_losses.append(loss.item())
+            print(f"Epoch {epoch} | Train Loss: {training_loss/len(train_loader):.8f} | Val Loss: {avg_val_loss:.8f}")
+            training_losses.append(training_loss/len(train_loader))
             validation_losses.append(avg_val_loss)
         if epoch % 1000 == 0:
             # Save periodic checkpoint
@@ -183,19 +199,19 @@ def train_model():
                 'scheduler_state_dict': scheduler.state_dict(),
                 'train_loss': loss.item(),
                 'val_loss': avg_val_loss,
-            }, f"/pscratch/sd/h/hbassi/models/GS_unet_checkpoint_epoch_{epoch}_ablation_masked_t=3.pth")
+            }, f"/pscratch/sd/h/hbassi/models/GS_Funet_checkpoint_epoch_{epoch}_Aij_tenth_test.pth")
             
             # Save best model
             if avg_val_loss < best_val_loss:
                 best_val_loss = avg_val_loss
-                torch.save(model.state_dict(), "/pscratch/sd/h/hbassi/models/GS_unet_best_model_ablation_mem=10.pth")
+                torch.save(model.state_dict(), "/pscratch/sd/h/hbassi/models/GS_Funet_best_model_Aij_tenth_test.pth")
                 print(f"New best model saved with val loss {avg_val_loss:.8f}")
-    with open('./logs/GS_Funet_multi_traj_training_ablation_masked_mem=10.npy', 'wb') as f:
-        np.save(f, training_losses)
-    f.close()
-    with open('./logs/GS_Funet_multi_traj_validation_ablation_masked_mem=10.npy', 'wb') as f:
-        np.save(f, validation_losses)
-    f.close()
+        with open('./logs/GS_Funet_multi_traj_training_Aij_tenth.npy', 'wb') as f:
+            np.save(f, training_losses)
+        f.close()
+        with open('./logs/GS_Funet_multi_traj_validation_Aij_tenth.npy', 'wb') as f:
+            np.save(f, validation_losses)
+        f.close()
 
 # ----------------------------
 # Run Training
